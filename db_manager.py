@@ -16,7 +16,8 @@ class DatabaseManager:
                     group_id INTEGER PRIMARY KEY,
                     owner_id INTEGER NOT NULL,
                     is_premium BOOLEAN DEFAULT 0,
-                    timeout_seconds INTEGER DEFAULT 300
+                    timeout_seconds INTEGER DEFAULT 300,
+                    video_prompt TEXT
                 )
             """)
             
@@ -30,18 +31,31 @@ class DatabaseManager:
                     PRIMARY KEY (user_id, group_id)
                 )
             """)
+            
+            # Upgrade check: Alter groups to add video_prompt if it does not exist (backwards compatibility)
+            try:
+                await db.execute("ALTER TABLE groups ADD COLUMN video_prompt TEXT")
+            except Exception:
+                pass
+
             await db.commit()
         logger.info("Database tables initialized successfully.")
 
     # ----------------------------------------------------
     # GROUP MANAGEMENT METHODS
     # ----------------------------------------------------
-    async def add_group(self, group_id: int, owner_id: int, is_premium: bool = False, timeout_seconds: int = 300):
+    async def add_group(self, group_id: int, owner_id: int, is_premium: bool = False, timeout_seconds: int = 300, video_prompt: str = None):
         """Registers a new group in the database."""
         async with aiosqlite.connect(self.db_path) as db:
+            # Insert or ignore to ensure we don't wipe custom prompt if registered again
             await db.execute(
-                "INSERT OR REPLACE INTO groups (group_id, owner_id, is_premium, timeout_seconds) VALUES (?, ?, ?, ?)",
-                (group_id, owner_id, 1 if is_premium else 0, timeout_seconds)
+                "INSERT OR IGNORE INTO groups (group_id, owner_id, is_premium, timeout_seconds, video_prompt) VALUES (?, ?, ?, ?, ?)",
+                (group_id, owner_id, 1 if is_premium else 0, timeout_seconds, video_prompt)
+            )
+            # Update core params while preserving custom prompt
+            await db.execute(
+                "UPDATE groups SET owner_id = ?, is_premium = ?, timeout_seconds = ? WHERE group_id = ?",
+                (owner_id, 1 if is_premium else 0, timeout_seconds, group_id)
             )
             await db.commit()
         logger.info(f"Group {group_id} registered/updated with owner {owner_id} (Premium: {is_premium}).")
@@ -57,7 +71,8 @@ class DatabaseManager:
                         "group_id": row["group_id"],
                         "owner_id": row["owner_id"],
                         "is_premium": bool(row["is_premium"]),
-                        "timeout_seconds": row["timeout_seconds"]
+                        "timeout_seconds": row["timeout_seconds"],
+                        "video_prompt": row["video_prompt"]
                     }
                 return None
 
@@ -80,6 +95,16 @@ class DatabaseManager:
             )
             await db.commit()
         logger.info(f"Group {group_id} verification timeout updated to {timeout_seconds}s.")
+
+    async def update_group_video_prompt(self, group_id: int, video_prompt: str):
+        """Updates the custom video verification prompt message for a group."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE groups SET video_prompt = ? WHERE group_id = ?",
+                (video_prompt, group_id)
+            )
+            await db.commit()
+        logger.info(f"Group {group_id} video prompt updated.")
 
     # ----------------------------------------------------
     # PENDING USERS MANAGEMENT METHODS

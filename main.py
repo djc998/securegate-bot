@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 # Initialize database manager
 db = DatabaseManager()
 
+# Global dictionary to track pending admin settings changes
+# Key: user_id (admin ID), Value: {"group_id": group_id, "action": "awaiting_video_prompt"}
+pending_admin_configs = {}
+
 # ----------------------------------------------------
 # TIMEOUT KICK CALLBACK
 # ----------------------------------------------------
@@ -367,6 +371,42 @@ async def on_private_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to forward verification video to admin {owner_id}: {e}")
         await message.reply_text("❌ An error occurred transmitting your video. Please contact a group administrator.")
 
+# Text message handler in DMs for settings configuration
+async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message.chat.type != "private":
+        return
+
+    user_id = message.from_user.id
+
+    if user_id in pending_admin_configs:
+        config = pending_admin_configs[user_id]
+        if config["action"] == "awaiting_video_prompt":
+            group_id = config["group_id"]
+            custom_text = message.text.strip()
+
+            if custom_text == "/cancel":
+                del pending_admin_configs[user_id]
+                await message.reply_text("❌ Configuration changes cancelled.")
+                # Render settings dashboard
+                await render_settings_dashboard(message, group_id, edit=False)
+                return
+
+            # Update DB
+            await db.update_group_video_prompt(group_id, custom_text)
+
+            # Clear state
+            del pending_admin_configs[user_id]
+
+            await message.reply_text(
+                "✅ <b>Success!</b>\n\nYour custom video verification instructions have been updated successfully.",
+                parse_mode="HTML"
+            )
+
+            # Rerender settings dashboard
+            await render_settings_dashboard(message, group_id, edit=False)
+            return
+
 # Start DM command catcher
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -380,10 +420,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0] == "verify":
         pending = await db.get_pending_user_any_group(user_id)
         if pending and pending["status"] == "pending_video":
-            await message.reply_text(
-                "📹 <b>SecureGate Video Gate Portal</b>\n\n"
+            group = await db.get_group(pending["group_id"])
+            prompt = group["video_prompt"] if group and group["video_prompt"] else (
                 "Please record or send a brief video message showing yourself (video note or video file). "
-                "The bot will forward it to the channel owners to verify you are a genuine human.",
+                "The bot will forward it to the channel owners to verify you are a genuine human."
+            )
+            await message.reply_text(
+                f"📹 <b>SecureGate Video Gate Portal</b>\n\n{prompt}",
                 parse_mode="HTML"
             )
             return
@@ -642,15 +685,17 @@ async def render_settings_dashboard(message_object, group_id: int, edit: bool = 
     if not group:
         return
 
+    custom_prompt = group['video_prompt'] if group['video_prompt'] else "[Default Standard Instructions]"
     text = (
         f"⚙️ <b>SecureGate Settings Control</b>\n\n"
         f"Group: <code>{group_id}</code>\n"
         f"Tier Status: {'🌟 Premium (Tier 2 Active)' if group['is_premium'] else '🆓 Free Plan (Math Challenge Only)'}\n"
-        f"Verification Timeout: <b>{group['timeout_seconds']} seconds</b>\n\n"
-        f"Adjust the verification countdown length below:"
+        f"Verification Timeout: <b>{group['timeout_seconds']} seconds</b>\n"
+        f"Custom Video Prompt: <code>{custom_prompt}</code>\n\n"
+        f"Adjust the settings below:"
     )
 
-    markup = InlineKeyboardMarkup([
+    buttons = [
         [
             InlineKeyboardButton("-30 Seconds ⬇️", callback_data=f"set_time_{group_id}_minus30"),
             InlineKeyboardButton("+30 Seconds ⬆️", callback_data=f"set_time_{group_id}_plus30")
@@ -659,7 +704,18 @@ async def render_settings_dashboard(message_object, group_id: int, edit: bool = 
             InlineKeyboardButton("Set to 2 Minutes ⏱️", callback_data=f"set_time_{group_id}_120"),
             InlineKeyboardButton("Set to 5 Minutes ⏱️", callback_data=f"set_time_{group_id}_300")
         ]
-    ])
+    ]
+
+    if group["is_premium"]:
+        buttons.append([
+            InlineKeyboardButton("Edit Video Prompt ✏️", callback_data=f"set_time_{group_id}_edit")
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton("Unlock Premium Video Gate 🌟", callback_data=f"set_time_{group_id}_unlock")
+        ])
+
+    markup = InlineKeyboardMarkup(buttons)
 
     if edit:
         await message_object.edit_text(text, reply_markup=markup, parse_mode="HTML")
@@ -685,17 +741,52 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if action == "minus30":
         new_timeout = max(30, current_timeout - 30)
+        if new_timeout != current_timeout:
+            await db.update_group_timeout(group_id, new_timeout)
+            await render_settings_dashboard(query.message, group_id, edit=True)
     elif action == "plus30":
         new_timeout = min(1200, current_timeout + 30)
+        if new_timeout != current_timeout:
+            await db.update_group_timeout(group_id, new_timeout)
+            await render_settings_dashboard(query.message, group_id, edit=True)
     elif action == "120":
         new_timeout = 120
+        if new_timeout != current_timeout:
+            await db.update_group_timeout(group_id, new_timeout)
+            await render_settings_dashboard(query.message, group_id, edit=True)
     elif action == "300":
         new_timeout = 300
-    else:
-        return
-
-    if new_timeout != current_timeout:
-        await db.update_group_timeout(group_id, new_timeout)
+        if new_timeout != current_timeout:
+            await db.update_group_timeout(group_id, new_timeout)
+            await render_settings_dashboard(query.message, group_id, edit=True)
+    elif action == "edit":
+        # Awaiting custom prompt input
+        pending_admin_configs[query.from_user.id] = {"group_id": group_id, "action": "awaiting_video_prompt"}
+        await query.edit_message_text(
+            text=(
+                f"✏️ <b>Edit Custom Video Verification Prompt</b>\n\n"
+                f"Group: <code>{group_id}</code>\n\n"
+                f"Please type and send your custom verification instructions in your next message. "
+                f"Your prompt will be presented to joining users when they are directed to DM the bot with a video.\n\n"
+                f"<i>Example: 'Please say your first name and your favorite color to verify.'</i>\n\n"
+                f"To cancel and return to settings, type `/cancel`."
+            ),
+            parse_mode="HTML"
+        )
+    elif action == "unlock":
+        await query.edit_message_text(
+            text=(
+                f"🌟 <b>Unlock SecureGate Premium</b>\n\n"
+                f"Unlocking premium activates Tier-2 Video Gating and settings dashboards for your channel.\n\n"
+                f"👉 <b>How to Upgrade</b>: Go back to your group chat and type the command **`/premium`**. "
+                f"I will private message you a secure checkout link using Telegram Stars!"
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back to Settings", callback_data=f"set_time_{group_id}_back")
+            ]])
+        )
+    elif action == "back":
         await render_settings_dashboard(query.message, group_id, edit=True)
 
 # ----------------------------------------------------
@@ -734,6 +825,12 @@ def main():
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & (filters.VIDEO | filters.VIDEO_NOTE), 
         on_private_video
+    ))
+
+    # Text configuration handlers for administrators in private DMs
+    application.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+        on_private_text
     ))
 
     # Admin verification decisions Callback Query
