@@ -812,6 +812,13 @@ async def render_settings_dashboard(message_object, context: ContextTypes.DEFAUL
         [
             InlineKeyboardButton("Set to 2 Minutes ⏱️", callback_data=f"set_time_{group_id}_120"),
             InlineKeyboardButton("Set to 5 Minutes ⏱️", callback_data=f"set_time_{group_id}_300")
+        ],
+        [
+            InlineKeyboardButton("Set to 15 Minutes ⏱️", callback_data=f"set_time_{group_id}_900"),
+            InlineKeyboardButton("Set to 30 Minutes ⏱️", callback_data=f"set_time_{group_id}_1800")
+        ],
+        [
+            InlineKeyboardButton("Set to 1 Hour ⏱️", callback_data=f"set_time_{group_id}_3600")
         ]
     ]
 
@@ -892,7 +899,7 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await db.update_group_timeout(group_id, new_timeout)
             await render_settings_dashboard(query.message, context, group_id, edit=True)
     elif action == "plus30":
-        new_timeout = min(1200, current_timeout + 30)
+        new_timeout = min(3600, current_timeout + 30)
         if new_timeout != current_timeout:
             await db.update_group_timeout(group_id, new_timeout)
             await render_settings_dashboard(query.message, context, group_id, edit=True)
@@ -903,6 +910,21 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await render_settings_dashboard(query.message, context, group_id, edit=True)
     elif action == "300":
         new_timeout = 300
+        if new_timeout != current_timeout:
+            await db.update_group_timeout(group_id, new_timeout)
+            await render_settings_dashboard(query.message, context, group_id, edit=True)
+    elif action == "900":
+        new_timeout = 900
+        if new_timeout != current_timeout:
+            await db.update_group_timeout(group_id, new_timeout)
+            await render_settings_dashboard(query.message, context, group_id, edit=True)
+    elif action == "1800":
+        new_timeout = 1800
+        if new_timeout != current_timeout:
+            await db.update_group_timeout(group_id, new_timeout)
+            await render_settings_dashboard(query.message, context, group_id, edit=True)
+    elif action == "3600":
+        new_timeout = 3600
         if new_timeout != current_timeout:
             await db.update_group_timeout(group_id, new_timeout)
             await render_settings_dashboard(query.message, context, group_id, edit=True)
