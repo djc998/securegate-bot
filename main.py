@@ -398,7 +398,7 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del pending_admin_configs[user_id]
                 await message.reply_text("❌ Configuration changes cancelled.")
                 # Render settings dashboard
-                await render_settings_dashboard(message, group_id, edit=False)
+                await render_settings_dashboard(message, context, group_id, edit=False)
                 return
 
             # Update DB
@@ -413,7 +413,7 @@ async def on_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             # Rerender settings dashboard
-            await render_settings_dashboard(message, group_id, edit=False)
+            await render_settings_dashboard(message, context, group_id, edit=False)
             return
 
 # Start DM command catcher
@@ -763,18 +763,30 @@ async def settings_command_handler(update: Update, context: ContextTypes.DEFAULT
         text = "🛡️ <b>MySecureGate Settings Control</b>\n\nYou manage multiple registered groups. Please select which group you would like to customize below:"
         buttons = []
         for g in groups:
-            buttons.append([InlineKeyboardButton(f"👥 Group {g['group_id']}", callback_data=f"set_time_{g['group_id']}_show")])
+            gid = g['group_id']
+            try:
+                chat = await context.bot.get_chat(gid)
+                chat_title = chat.title
+            except Exception:
+                chat_title = "Unknown Group"
+            buttons.append([InlineKeyboardButton(f"👥 {chat_title} (ID: {gid})", callback_data=f"set_time_{gid}_show")])
         markup = InlineKeyboardMarkup(buttons)
         await message.reply_text(text, reply_markup=markup, parse_mode="HTML")
         return
 
     # Render settings list directly if they only have one group
-    await render_settings_dashboard(message, groups[0]["group_id"], edit=False)
+    await render_settings_dashboard(message, context, groups[0]["group_id"], edit=False)
 
-async def render_settings_dashboard(message_object, group_id: int, edit: bool = False):
+async def render_settings_dashboard(message_object, context: ContextTypes.DEFAULT_TYPE, group_id: int, edit: bool = False):
     group = await db.get_group(group_id)
     if not group:
         return
+
+    try:
+        chat = await context.bot.get_chat(group_id)
+        chat_title = chat.title
+    except Exception:
+        chat_title = "Unknown Group"
 
     tier_status = "🆓 Free Plan (Math Challenge Only)"
     if group["is_premium"]:
@@ -785,7 +797,7 @@ async def render_settings_dashboard(message_object, group_id: int, edit: bool = 
     custom_prompt = group['video_prompt'] if group['video_prompt'] else "[Default Standard Instructions]"
     text = (
         f"⚙️ <b>MySecureGate Settings Control</b>\n\n"
-        f"Group: <code>{group_id}</code>\n"
+        f"Group: <b>{chat_title}</b> <code>({group_id})</code>\n"
         f"Tier Status: {tier_status}\n"
         f"Verification Timeout: <b>{group['timeout_seconds']} seconds</b>\n"
         f"Custom Video Prompt: <code>{custom_prompt}</code>\n\n"
@@ -855,7 +867,12 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         text = "🛡️ <b>MySecureGate Settings Control</b>\n\nYou manage multiple registered groups. Please select which group you would like to customize below:"
         buttons = []
         for gid in groups:
-            buttons.append([InlineKeyboardButton(f"👥 Group {gid}", callback_data=f"set_time_{gid}_show")])
+            try:
+                chat = await context.bot.get_chat(gid)
+                chat_title = chat.title
+            except Exception:
+                chat_title = "Unknown Group"
+            buttons.append([InlineKeyboardButton(f"👥 {chat_title} (ID: {gid})", callback_data=f"set_time_{gid}_show")])
         markup = InlineKeyboardMarkup(buttons)
         await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
         return
@@ -873,24 +890,24 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         new_timeout = max(30, current_timeout - 30)
         if new_timeout != current_timeout:
             await db.update_group_timeout(group_id, new_timeout)
-            await render_settings_dashboard(query.message, group_id, edit=True)
+            await render_settings_dashboard(query.message, context, group_id, edit=True)
     elif action == "plus30":
         new_timeout = min(1200, current_timeout + 30)
         if new_timeout != current_timeout:
             await db.update_group_timeout(group_id, new_timeout)
-            await render_settings_dashboard(query.message, group_id, edit=True)
+            await render_settings_dashboard(query.message, context, group_id, edit=True)
     elif action == "120":
         new_timeout = 120
         if new_timeout != current_timeout:
             await db.update_group_timeout(group_id, new_timeout)
-            await render_settings_dashboard(query.message, group_id, edit=True)
+            await render_settings_dashboard(query.message, context, group_id, edit=True)
     elif action == "300":
         new_timeout = 300
         if new_timeout != current_timeout:
             await db.update_group_timeout(group_id, new_timeout)
-            await render_settings_dashboard(query.message, group_id, edit=True)
+            await render_settings_dashboard(query.message, context, group_id, edit=True)
     elif action == "show":
-        await render_settings_dashboard(query.message, group_id, edit=True)
+        await render_settings_dashboard(query.message, context, group_id, edit=True)
     elif action == "edit":
         # Awaiting custom prompt input
         pending_admin_configs[query.from_user.id] = {"group_id": group_id, "action": "awaiting_video_prompt"}
@@ -919,7 +936,7 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             ]])
         )
     elif action == "back":
-        await render_settings_dashboard(query.message, group_id, edit=True)
+        await render_settings_dashboard(query.message, context, group_id, edit=True)
 
 # ----------------------------------------------------
 # MAIN INITIALIZER
