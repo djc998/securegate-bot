@@ -340,8 +340,14 @@ async def on_private_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update state to under_review
     await db.update_pending_user_status(user_id, group_id, "under_review")
 
-    # Send video to admin
-    owner_id = group["owner_id"]
+    # Send video to all admins
+    try:
+        admins = await context.bot.get_chat_administrators(group_id)
+        admin_ids = [admin.user.id for admin in admins if not admin.user.is_bot]
+    except Exception as e:
+        logger.error(f"Failed to fetch admins for group {group_id}: {e}")
+        admin_ids = [group["owner_id"]]
+        
     user_mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
     admin_caption = (
         f"📹 <b>Identity Verification Submission</b>\n\n"
@@ -356,28 +362,33 @@ async def on_private_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ])
 
-    try:
-        if message.video:
-            await context.bot.send_video(
-                chat_id=owner_id, 
-                video=message.video.file_id, 
-                caption=admin_caption, 
-                reply_markup=markup,
-                parse_mode="HTML"
-            )
-        elif message.video_note:
-            # Video note notes do not support captions natively, so we send the file followed by description
-            await context.bot.send_video_note(chat_id=owner_id, video_note=message.video_note.file_id)
-            await context.bot.send_message(
-                chat_id=owner_id, 
-                text=admin_caption, 
-                reply_markup=markup,
-                parse_mode="HTML"
-            )
-        
-        await message.reply_text("✅ <b>Video Received!</b>\n\nYour video has been securely forwarded to the group administrator. The countdown timer has been paused. You will be unmuted instantly upon review.", parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Failed to forward verification video to admin {owner_id}: {e}")
+    success_count = 0
+    for current_admin_id in admin_ids:
+        try:
+            if message.video:
+                await context.bot.send_video(
+                    chat_id=current_admin_id, 
+                    video=message.video.file_id, 
+                    caption=admin_caption, 
+                    reply_markup=markup,
+                    parse_mode="HTML"
+                )
+            elif message.video_note:
+                # Video note notes do not support captions natively, so we send the file followed by description
+                await context.bot.send_video_note(chat_id=current_admin_id, video_note=message.video_note.file_id)
+                await context.bot.send_message(
+                    chat_id=current_admin_id, 
+                    text=admin_caption, 
+                    reply_markup=markup,
+                    parse_mode="HTML"
+                )
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Failed to forward verification video to admin {current_admin_id}: {e}")
+            
+    if success_count > 0:
+        await message.reply_text("✅ <b>Video Received!</b>\n\nYour video has been securely forwarded to the group administrators. The countdown timer has been paused. You will be unmuted instantly upon review.", parse_mode="HTML")
+    else:
         await message.reply_text("❌ An error occurred transmitting your video. Please contact a group administrator.")
 
 # Text message handler in DMs for settings configuration
@@ -462,9 +473,15 @@ async def on_admin_decision_callback(update: Update, context: ContextTypes.DEFAU
     if not group:
         return
 
-    # Check if the user executing the action is the group owner
-    if query.from_user.id != group["owner_id"]:
-        await query.message.reply_text("⚠️ This resolution action can only be completed by the registered group owner.")
+    # Check if the user executing the action is an admin
+    try:
+        member = await context.bot.get_chat_member(target_group_id, query.from_user.id)
+        if member.status not in ["administrator", "creator"]:
+            await query.message.reply_text("⚠️ This resolution action can only be completed by a group administrator.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await query.message.reply_text("⚠️ This resolution action can only be completed by a group administrator.")
         return
 
     pending = await db.get_pending_user(target_user_id, target_group_id)
