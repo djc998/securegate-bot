@@ -41,6 +41,12 @@ class DatabaseManager:
             except Exception:
                 pass
 
+            # Upgrade check: Alter pending_users to add username if it does not exist
+            try:
+                await db.execute("ALTER TABLE pending_users ADD COLUMN username TEXT")
+            except Exception:
+                pass
+
             # Upgrade check: Alter groups to add trial columns (backwards compatibility)
             for col, col_type in [("trial_started_at", "INTEGER DEFAULT 0"), 
                                   ("trial_invoiced", "BOOLEAN DEFAULT 0"), 
@@ -164,12 +170,12 @@ class DatabaseManager:
     # ----------------------------------------------------
     # PENDING USERS MANAGEMENT METHODS
     # ----------------------------------------------------
-    async def add_pending_user(self, user_id: int, group_id: int, status: str, join_time: int):
+    async def add_pending_user(self, user_id: int, group_id: int, status: str, join_time: int, username: str = None):
         """Adds a new pending user to the verification funnel."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO pending_users (user_id, group_id, status, join_time) VALUES (?, ?, ?, ?)",
-                (user_id, group_id, status, join_time)
+                "INSERT OR REPLACE INTO pending_users (user_id, group_id, status, join_time, username) VALUES (?, ?, ?, ?, ?)",
+                (user_id, group_id, status, join_time, username)
             )
             await db.commit()
         logger.info(f"User {user_id} added to pending queue for group {group_id} (Status: {status}).")
@@ -186,6 +192,22 @@ class DatabaseManager:
                         "group_id": row["group_id"],
                         "status": row["status"],
                         "join_time": row["join_time"]
+                    }
+                return None
+
+    async def get_pending_user_by_username(self, username: str, group_id: int):
+        """Gets pending user credentials by username and group ID."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM pending_users WHERE LOWER(username) = LOWER(?) AND group_id = ?", (username, group_id)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        "user_id": row["user_id"],
+                        "group_id": row["group_id"],
+                        "status": row["status"],
+                        "join_time": row["join_time"],
+                        "username": row["username"]
                     }
                 return None
 

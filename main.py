@@ -172,7 +172,7 @@ async def on_chat_member_updated(update: Update, context: ContextTypes.DEFAULT_T
 
     # Store status containing the answer: "pending_math:ANS"
     status_str = f"pending_math:{correct_ans}"
-    await db.add_pending_user(user_id, group_id, status_str, int(time.time()))
+    await db.add_pending_user(user_id, group_id, status_str, int(time.time()), chat_member.new_chat_member.user.username)
 
     # Build inline keyboard buttons
     buttons = [[
@@ -589,6 +589,71 @@ async def setup_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         "💡 <b>Admin Customization</b>:\n"
         "• Type /settings in my private DMs to configure verification timeouts.\n"
         "• Type /premium inside the group to unlock Tier-2 Video Verification.",
+        parse_mode="HTML"
+    )
+
+async def verify_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message.chat.type in ["private"]:
+        await message.reply_text("❌ This command must be run within a group chat.")
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    # Verify sender is a group admin
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status not in ["administrator", "creator"]:
+            await message.reply_text("❌ Only group administrators can use this command.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        return
+
+    target_user_id = None
+    target_mention = None
+
+    # Check if there are arguments like /verify @username
+    if context.args:
+        arg = context.args[0].strip()
+        if arg.startswith("@"):
+            username = arg[1:]
+            pending = await db.get_pending_user_by_username(username, chat_id)
+            if pending:
+                target_user_id = pending["user_id"]
+                target_mention = f"@{username}"
+        
+    # Check if there is a text_mention
+    if not target_user_id:
+        for entity in message.entities:
+            if entity.type == "text_mention" and entity.user:
+                target_user_id = entity.user.id
+                target_mention = entity.user.first_name
+                break
+
+    # Check if replied to a user
+    if not target_user_id and message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.id
+        target_mention = f"@{message.reply_to_message.from_user.username}" if message.reply_to_message.from_user.username else message.reply_to_message.from_user.first_name
+
+    if not target_user_id:
+        await message.reply_text("❌ Could not identify user. Please either `/verify @username` (if they are pending) or reply to one of their messages with `/verify`.")
+        return
+
+    # UNMUTE & Clear queue
+    await unmute_member(context.bot, chat_id, target_user_id)
+    await db.delete_pending_user(target_user_id, chat_id)
+
+    # Cancel scheduled timeout job if exists
+    jobs = context.job_queue.get_jobs_by_name(f"kick_{target_user_id}_{chat_id}")
+    for job in jobs:
+        job.schedule_removal()
+
+    # Send confirmation to group chat
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"✅ <b>Manually Verified!</b>\n\nAdmin manually approved user {target_mention} and they have been unmuted.",
         parse_mode="HTML"
     )
 
@@ -1029,6 +1094,7 @@ def main():
     application.add_handler(CommandHandler("setup", setup_command_handler))
     application.add_handler(CommandHandler("premium", premium_command_handler))
     application.add_handler(CommandHandler("settings", settings_command_handler))
+    application.add_handler(CommandHandler("verify", verify_command_handler))
 
     # Math buttons query response
     application.add_handler(CallbackQueryHandler(on_math_callback, pattern="^math_"))
