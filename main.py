@@ -1,0 +1,757 @@
+import os
+import random
+import time
+import logging
+import aiosqlite
+from dotenv import load_dotenv
+
+from telegram import (
+    Update,
+    ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ChatMemberHandler,
+    PreCheckoutQueryHandler,
+    ContextTypes,
+    filters,
+)
+
+from db_manager import DatabaseManager
+
+# Load environment variables
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "WHITELABEL").upper()
+TIME_LIMIT_SECONDS = int(os.getenv("TIME_LIMIT_SECONDS", "300"))
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
+
+CLIENT_OWNER_ID = os.getenv("CLIENT_OWNER_ID")
+CLIENT_GROUP_CHAT_ID = os.getenv("CLIENT_GROUP_CHAT_ID")
+
+if CLIENT_OWNER_ID:
+    CLIENT_OWNER_ID = int(CLIENT_OWNER_ID)
+if CLIENT_GROUP_CHAT_ID:
+    CLIENT_GROUP_CHAT_ID = int(CLIENT_GROUP_CHAT_ID)
+
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Initialize database manager
+db = DatabaseManager()
+
+# ----------------------------------------------------
+# TIMEOUT KICK CALLBACK
+# ----------------------------------------------------
+async def kick_timeout_callback(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    data = job.data
+    user_id = data["user_id"]
+    group_id = data["group_id"]
+    msg_id = data["msg_id"]
+    username = data["username"]
+
+    # Check if user is still pending
+    pending = await db.get_pending_user(user_id, group_id)
+    if pending:
+        logger.info(f"User {user_id} timed out in group {group_id}. Kicking...")
+        try:
+            # Kick is ban followed by unban
+            await context.bot.ban_chat_member(group_id, user_id)
+            await context.bot.unban_chat_member(group_id, user_id)
+
+            # Edit message in group
+            await context.bot.edit_message_text(
+                chat_id=group_id,
+                message_id=msg_id,
+                text=f"⏳ <b>Verification Timeout</b>: User @{username} failed to verify in time and has been kicked.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Error kicking timed out user {user_id}: {e}")
+
+        # Delete pending entry
+        await db.delete_pending_user(user_id, group_id)
+
+# ----------------------------------------------------
+# 1. CORE EVENTS & MIDDLEWARES
+# ----------------------------------------------------
+
+# chat member updated handler
+async def on_chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_member = update.chat_member
+    if not chat_member:
+        return
+
+    group_id = chat_member.chat.id
+    user_id = chat_member.new_chat_member.user.id
+    username = chat_member.new_chat_member.user.username or chat_member.new_chat_member.user.first_name
+
+    old_status = chat_member.old_chat_member.status
+    new_status = chat_member.new_chat_member.status
+
+    # We match standard user joining statuses
+    is_joining = (new_status in ["member", "restricted"]) and (old_status in ["left", "kicked", "banned", None])
+    if not is_joining:
+        return
+
+    # Skip bot joining
+    if chat_member.new_chat_member.user.is_bot:
+        return
+
+    # Check group registration
+    group = await db.get_group(group_id)
+    if not group:
+        if DEPLOYMENT_MODE == "WHITELABEL" and group_id == CLIENT_GROUP_CHAT_ID:
+            # Dynamic setup for Whitelabel
+            await db.add_group(CLIENT_GROUP_CHAT_ID, CLIENT_OWNER_ID, is_premium=True, timeout_seconds=TIME_LIMIT_SECONDS)
+            group = await db.get_group(group_id)
+        else:
+            logger.info(f"Group {group_id} not registered in database. Skipping restriction.")
+            return
+
+    logger.info(f"User {user_id} (@{username}) joined group {group_id}. Restricting and challenging...")
+
+    # Restrict permissions (Mute)
+    mute_permissions = ChatPermissions(
+        can_send_messages=False,
+        can_send_audios=False,
+        can_send_documents=False,
+        can_send_photos=False,
+        can_send_videos=False,
+        can_send_video_notes=False,
+        can_send_voice_notes=False,
+        can_send_polls=False,
+        can_send_other_messages=False,
+        can_add_web_page_previews=False,
+        can_change_info=False,
+        can_invite_users=False,
+        can_pin_messages=False
+    )
+    
+    try:
+        await context.bot.restrict_chat_member(group_id, user_id, permissions=mute_permissions)
+    except Exception as e:
+        logger.error(f"Failed to restrict member {user_id}: {e}")
+        return
+
+    # Generate math addition challenge
+    num1 = random.randint(1, 9)
+    num2 = random.randint(1, 9)
+    correct_ans = num1 + num2
+
+    options = [correct_ans]
+    while len(options) < 4:
+        wrong = random.randint(2, 18)
+        if wrong not in options:
+            options.append(wrong)
+    random.shuffle(options)
+
+    # Store status containing the answer: "pending_math:ANS"
+    status_str = f"pending_math:{correct_ans}"
+    await db.add_pending_user(user_id, group_id, status_str, int(time.time()))
+
+    # Build inline keyboard buttons
+    buttons = [[
+        InlineKeyboardButton(str(opt), callback_data=f"math_{user_id}_{group_id}_{opt}") 
+        for opt in options
+    ]]
+    reply_markup = InlineKeyboardMarkup(buttons)
+
+    # Prompt message in group
+    user_mention = chat_member.new_chat_member.user.mention_html()
+    msg = await context.bot.send_message(
+        chat_id=group_id,
+        text=f"🤖 <b>SecureGate Challenge</b>\n\nWelcome {user_mention}! To protect this space from bots, you must solve the mathematical puzzle below within <b>{group['timeout_seconds']} seconds</b> to be unmuted:\n\n💬 <code>{num1} + {num2} = ?</code>",
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
+
+    # Schedule Timeout Kick Job
+    job_name = f"kick_{user_id}_{group_id}"
+    job_data = {
+        "user_id": user_id,
+        "group_id": group_id,
+        "msg_id": msg.message_id,
+        "username": username
+    }
+    context.job_queue.run_once(
+        kick_timeout_callback, 
+        group["timeout_seconds"], 
+        data=job_data, 
+        name=job_name
+    )
+
+# ----------------------------------------------------
+# 2. COGNITIVE MATH CHALLENGE CALLBACK
+# ----------------------------------------------------
+async def on_math_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    target_user_id = int(parts[1])
+    target_group_id = int(parts[2])
+    chosen_ans = int(parts[3])
+
+    # Check if the user clicking is the one challenged
+    if query.from_user.id != target_user_id:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"⚠️ @{query.from_user.username or query.from_user.first_name}, this challenge is intended for another user.",
+            reply_to_message_id=query.message.message_id
+        )
+        return
+
+    # Fetch user pending status
+    pending = await db.get_pending_user(target_user_id, target_group_id)
+    if not pending or not pending["status"].startswith("pending_math"):
+        return
+
+    # Parse correct answer
+    correct_ans = int(pending["status"].split(":")[1])
+
+    # Cancel scheduled timeout job
+    jobs = context.job_queue.get_jobs_by_name(f"kick_{target_user_id}_{target_group_id}")
+    for job in jobs:
+        job.schedule_removal()
+
+    group = await db.get_group(target_group_id)
+
+    if chosen_ans == correct_ans:
+        # Correct answer!
+        if group["is_premium"]:
+            # Premium -> Proceed to Video verification Identity Gate
+            await db.update_pending_user_status(target_user_id, target_group_id, "pending_video")
+            
+            # Reschedule timeout for video DM submission (allow them default timeout seconds again)
+            job_name = f"kick_{target_user_id}_{target_group_id}"
+            job_data = {
+                "user_id": target_user_id,
+                "group_id": target_group_id,
+                "msg_id": query.message.message_id,
+                "username": query.from_user.username or query.from_user.first_name
+            }
+            context.job_queue.run_once(
+                kick_timeout_callback, 
+                group["timeout_seconds"], 
+                data=job_data, 
+                name=job_name
+            )
+
+            # Edit group message to prompt video verification
+            bot_info = await context.bot.get_me()
+            await query.edit_message_text(
+                text=f"✅ <b>Tier 1 Passed!</b>\n\nUser {query.from_user.mention_html()} passed the cognitive gate. However, this is a premium protected channel.\n\n📹 <b>Tier 2 Identity Verification</b>: Please click the button below to DM the bot with a brief video message containing yourself to complete verification.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔑 Video Verification Portal", url=f"https://t.me/{bot_info.username}?start=verify")
+                ]]),
+                parse_mode="HTML"
+            )
+        else:
+            # Free group -> Unmute instantly and delete from pending queue
+            await unmute_member(context.bot, target_group_id, target_user_id)
+            await db.delete_pending_user(target_user_id, target_group_id)
+
+            await query.edit_message_text(
+                text=f"✅ <b>Cognitive Gate Solved!</b>\n\nWelcome {query.from_user.mention_html()}! You solved the math puzzle and have been unmuted.",
+                parse_mode="HTML"
+            )
+    else:
+        # Incorrect answer -> Kick user instantly
+        logger.info(f"User {target_user_id} solved math puzzle incorrectly. Kicking...")
+        try:
+            await context.bot.ban_chat_member(target_group_id, target_user_id)
+            await context.bot.unban_chat_member(target_group_id, target_user_id)
+            
+            await query.edit_message_text(
+                text=f"❌ <b>Cognitive Gate Failed</b>: User {query.from_user.mention_html()} selected the wrong math solution and has been kicked."
+            )
+        except Exception as e:
+            logger.error(f"Error kicking failed math user {target_user_id}: {e}")
+
+        await db.delete_pending_user(target_user_id, target_group_id)
+
+# Helper function to unmute a member
+async def unmute_member(bot, group_id: int, user_id: int):
+    unmute_permissions = ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_invite_users=True
+    )
+    try:
+        await bot.restrict_chat_member(group_id, user_id, permissions=unmute_permissions)
+    except Exception as e:
+        logger.error(f"Error unmuting user {user_id} in chat {group_id}: {e}")
+
+# ----------------------------------------------------
+# 3. IDENTITY GATE (VIDEO SUBMISSION) & DM HANDLER
+# ----------------------------------------------------
+async def on_private_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    user_id = message.from_user.id
+    
+    # Locate user's active verification session
+    pending = await db.get_pending_user_any_group(user_id)
+    
+    if not pending or pending["status"] != "pending_video":
+        await message.reply_text("❌ No active video verification queue found for your account.")
+        return
+
+    group_id = pending["group_id"]
+    group = await db.get_group(group_id)
+
+    # Cancel/Pause timeout kick job
+    jobs = context.job_queue.get_jobs_by_name(f"kick_{user_id}_{group_id}")
+    for job in jobs:
+        job.schedule_removal()
+
+    # Update state to under_review
+    await db.update_pending_user_status(user_id, group_id, "under_review")
+
+    # Send video to admin
+    owner_id = group["owner_id"]
+    user_mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    admin_caption = (
+        f"📹 <b>Identity Verification Submission</b>\n\n"
+        f"New member {user_mention} (ID: <code>{user_id}</code>) submitted a verification video for your premium group: <code>{group_id}</code>.\n\n"
+        f"Please review the video and select the outcome below:"
+    )
+
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Approve Access ✅", callback_data=f"admin_approve_{user_id}_{group_id}"),
+            InlineKeyboardButton("Reject & Kick ❌", callback_data=f"admin_reject_{user_id}_{group_id}")
+        ]
+    ])
+
+    try:
+        if message.video:
+            await context.bot.send_video(
+                chat_id=owner_id, 
+                video=message.video.file_id, 
+                caption=admin_caption, 
+                reply_markup=markup,
+                parse_mode="HTML"
+            )
+        elif message.video_note:
+            # Video note notes do not support captions natively, so we send the file followed by description
+            await context.bot.send_video_note(chat_id=owner_id, video_note=message.video_note.file_id)
+            await context.bot.send_message(
+                chat_id=owner_id, 
+                text=admin_caption, 
+                reply_markup=markup,
+                parse_mode="HTML"
+            )
+        
+        await message.reply_text("✅ <b>Video Received!</b>\n\nYour video has been securely forwarded to the group administrator. The countdown timer has been paused. You will be unmuted instantly upon review.", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to forward verification video to admin {owner_id}: {e}")
+        await message.reply_text("❌ An error occurred transmitting your video. Please contact a group administrator.")
+
+# Start DM command catcher
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message.chat.type != "private":
+        return
+
+    # Check if they sent /start verify
+    args = context.args
+    user_id = message.from_user.id
+    
+    if args and args[0] == "verify":
+        pending = await db.get_pending_user_any_group(user_id)
+        if pending and pending["status"] == "pending_video":
+            await message.reply_text(
+                "📹 <b>SecureGate Video Gate Portal</b>\n\n"
+                "Please record or send a brief video message showing yourself (video note or video file). "
+                "The bot will forward it to the channel owners to verify you are a genuine human.",
+                parse_mode="HTML"
+            )
+            return
+            
+    await message.reply_text(
+        "🔒 <b>Welcome to SecureGate Control Portal!</b>\n\n"
+        "I protect Telegram groups from spammers. Add me to your group, elevate me to Administrator, and configure settings using command /settings in DM.",
+        parse_mode="HTML"
+    )
+
+# ----------------------------------------------------
+# 4. ADMINISTRATOR RESOLUTION CALLBACK
+# ----------------------------------------------------
+async def on_admin_decision_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    action = parts[1]
+    target_user_id = int(parts[2])
+    target_group_id = int(parts[3])
+
+    group = await db.get_group(target_group_id)
+    if not group:
+        return
+
+    # Check if the user executing the action is the group owner
+    if query.from_user.id != group["owner_id"]:
+        await query.message.reply_text("⚠️ This resolution action can only be completed by the registered group owner.")
+        return
+
+    pending = await db.get_pending_user(target_user_id, target_group_id)
+    if not pending or pending["status"] != "under_review":
+        await query.edit_message_text("⚠️ Verification session expired or already resolved.")
+        return
+
+    try:
+        user_member = await context.bot.get_chat_member(target_group_id, target_user_id)
+        username = user_member.user.username or user_member.user.first_name
+        mention = user_member.user.mention_html()
+    except Exception:
+        username = f"User_{target_user_id}"
+        mention = f"User (ID: {target_user_id})"
+
+    if action == "approve":
+        # UNMUTE & Clear queue
+        await unmute_member(context.bot, target_group_id, target_user_id)
+        await db.delete_pending_user(target_user_id, target_group_id)
+
+        # Notify admin DM
+        await query.edit_message_text(f"✅ Approved. {mention} unmuted in group.")
+
+        # Notify user DM
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"🎉 <b>Access Approved!</b>\n\nThe administrator verified your video. You are now unmuted in group <code>{target_group_id}</code>.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+            
+        # Send confirmation to group chat
+        await context.bot.send_message(
+            chat_id=target_group_id,
+            text=f"✅ <b>Identity Verified!</b>\n\nAdmin approved user {mention} and they have been unmuted.",
+            parse_mode="HTML"
+        )
+    elif action == "reject":
+        # Kick (Ban and Unban) & Clear Queue
+        try:
+            await context.bot.ban_chat_member(target_group_id, target_user_id)
+            await context.bot.unban_chat_member(target_group_id, target_user_id)
+            
+            # Notify user DM
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text="❌ <b>Access Rejected</b>\n\nYour video verification was rejected by the group administrator.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Error kicking rejected user: {e}")
+
+        await db.delete_pending_user(target_user_id, target_group_id)
+        
+        # Notify admin DM
+        await query.edit_message_text(f"❌ Rejected. User @{username} has been kicked.")
+
+# ----------------------------------------------------
+# 5. PUBLIC SETUP & /PREMIUM (STRIPE BILLING) ROUTINES
+# ----------------------------------------------------
+async def setup_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message.chat.type in ["private"]:
+        await message.reply_text("❌ Setup must be initiated within the target Telegram group.")
+        return
+
+    if DEPLOYMENT_MODE != "PUBLIC":
+        await message.reply_text("🛡️ This bot is whitelabeled. Custom setups are locked.")
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    # Verify sender is a group admin
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status not in ["administrator", "creator"]:
+            await message.reply_text("❌ Only group administrators can run the /setup command.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        return
+
+    # Verify bot is an admin
+    try:
+        bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
+        if bot_member.status != "administrator":
+            await message.reply_text("❌ Please elevate the bot to Administrator with group restriction rights first.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking bot status: {e}")
+        return
+
+    # Add to groups DB
+    await db.add_group(chat_id, user_id, is_premium=False, timeout_seconds=TIME_LIMIT_SECONDS)
+    
+    await message.reply_text(
+        "🛡️ <b>SecureGate Setup Completed!</b>\n\n"
+        "This group is now registered. I will intercept and challenge all new members joining.\n\n"
+        "💡 <b>Admin Customization</b>:\n"
+        "• Type /settings in my private DMs to configure verification timeouts.\n"
+        "• Type /premium inside the group to unlock Tier-2 Video Verification.",
+        parse_mode="HTML"
+    )
+
+async def premium_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message.chat.type in ["private"]:
+        await message.reply_text("❌ Premium commands must be run within your registered group chat.")
+        return
+
+    if DEPLOYMENT_MODE != "PUBLIC":
+        await message.reply_text("🛡️ This bot is a whitelabel deployment. Premium is pre-activated.")
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    group = await db.get_group(chat_id)
+    if not group:
+        await message.reply_text("❌ Please run /setup first to register this group in the database.")
+        return
+
+    if group["owner_id"] != user_id:
+        await message.reply_text("❌ Only the registered group owner can unlock premium tiers.")
+        return
+
+    if group["is_premium"]:
+        await message.reply_text("🌟 Premium is already fully unlocked for this group!")
+        return
+
+    # Send Native Telegram Stars Invoice (Currency XTR, Provider Token must be empty!)
+    title = "SecureGate Premium Channel Upgrade"
+    description = "Unlocks Tier-2 Video Identity Verification checks and settings dashboards for your channel."
+    payload = f"premium_upgrade_{chat_id}"
+    currency = "XTR"  # XTR is the currency code for Telegram Stars
+    stars_amount = 250  # Charge 250 Telegram Stars
+    prices = [LabeledPrice("Premium Upgrade (Stars)", stars_amount)]
+
+    try:
+        # We send it to their DMs to protect pricing and invoices from group chats
+        await context.bot.send_invoice(
+            chat_id=user_id,
+            title=title,
+            description=description,
+            payload=payload,
+            provider_token="",  # Must be empty for Telegram Stars!
+            currency=currency,
+            prices=prices,
+            start_parameter="premium-stars-upgrade"
+        )
+        await message.reply_text("📬 <b>Invoice Sent!</b>\n\nI have sent a secure Telegram Stars invoice to your private DMs. Click it to complete checkout with Stars.", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error dispatching Stars invoice: {e}")
+        await message.reply_text("❌ Could not dispatch payment details. Please check if you have started the bot in DMs.")
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    if query.invoice_payload.startswith("premium_upgrade_"):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="SecureGate billing matching error.")
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    payment = update.message.successful_payment
+    payload = payment.invoice_payload
+    group_id = int(payload.split("_")[2])
+
+    # Unlock Tier-2
+    await db.update_group_premium(group_id, is_premium=True)
+    
+    await update.message.reply_text(
+        "🌟 <b>Upgrade Successful!</b>\n\n"
+        "Thank you! Premium subscription tier has been fully unlocked. "
+        "Identity Gate (Video Verification) is now active for your channel.",
+        parse_mode="HTML"
+    )
+
+# ----------------------------------------------------
+# 6. SETTINGS PANEL (ADMIN DM INTERFACES)
+# ----------------------------------------------------
+async def settings_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message.chat.type != "private":
+        await message.reply_text("❌ The settings dashboard can only be accessed privately in DMs (@SecureGate).")
+        return
+
+    user_id = message.from_user.id
+    
+    # We retrieve all registered groups for this owner
+    # For a simple local setup, let's fetch groups from database
+    groups = []
+    
+    if DEPLOYMENT_MODE == "WHITELABEL":
+        if user_id == CLIENT_OWNER_ID:
+            group = await db.get_group(CLIENT_GROUP_CHAT_ID)
+            if group:
+                groups.append(group)
+    else:
+        # Public Mode: search sqlite database for all groups owned by user_id
+        async with aiosqlite.connect(db.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute("SELECT * FROM groups WHERE owner_id = ?", (user_id,)) as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    groups.append({
+                        "group_id": row["group_id"],
+                        "owner_id": row["owner_id"],
+                        "is_premium": bool(row["is_premium"]),
+                        "timeout_seconds": row["timeout_seconds"]
+                    })
+
+    if not groups:
+        await message.reply_text("❌ You do not own any registered groups. Add me to a group and run /setup inside the group chat.")
+        return
+
+    # Render settings list
+    await render_settings_dashboard(message, groups[0]["group_id"], edit=False)
+
+async def render_settings_dashboard(message_object, group_id: int, edit: bool = False):
+    group = await db.get_group(group_id)
+    if not group:
+        return
+
+    text = (
+        f"⚙️ <b>SecureGate Settings Control</b>\n\n"
+        f"Group: <code>{group_id}</code>\n"
+        f"Tier Status: {'🌟 Premium (Tier 2 Active)' if group['is_premium'] else '🆓 Free Plan (Math Challenge Only)'}\n"
+        f"Verification Timeout: <b>{group['timeout_seconds']} seconds</b>\n\n"
+        f"Adjust the verification countdown length below:"
+    )
+
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("-30 Seconds ⬇️", callback_data=f"set_time_{group_id}_minus30"),
+            InlineKeyboardButton("+30 Seconds ⬆️", callback_data=f"set_time_{group_id}_plus30")
+        ],
+        [
+            InlineKeyboardButton("Set to 2 Minutes ⏱️", callback_data=f"set_time_{group_id}_120"),
+            InlineKeyboardButton("Set to 5 Minutes ⏱️", callback_data=f"set_time_{group_id}_300")
+        ]
+    ])
+
+    if edit:
+        await message_object.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await message_object.reply_text(text, reply_markup=markup, parse_mode="HTML")
+
+async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    group_id = int(parts[2])
+    action = parts[3]
+
+    group = await db.get_group(group_id)
+    if not group:
+        return
+
+    if query.from_user.id != group["owner_id"]:
+        return
+
+    current_timeout = group["timeout_seconds"]
+    
+    if action == "minus30":
+        new_timeout = max(30, current_timeout - 30)
+    elif action == "plus30":
+        new_timeout = min(1200, current_timeout + 30)
+    elif action == "120":
+        new_timeout = 120
+    elif action == "300":
+        new_timeout = 300
+    else:
+        return
+
+    if new_timeout != current_timeout:
+        await db.update_group_timeout(group_id, new_timeout)
+        await render_settings_dashboard(query.message, group_id, edit=True)
+
+# ----------------------------------------------------
+# MAIN INITIALIZER
+# ----------------------------------------------------
+async def post_init_callback(application):
+    # Initialize DB
+    await db.init_db()
+
+    # Pre-register whitelabel if applicable
+    if DEPLOYMENT_MODE == "WHITELABEL":
+        if CLIENT_GROUP_CHAT_ID and CLIENT_OWNER_ID:
+            await db.add_group(CLIENT_GROUP_CHAT_ID, CLIENT_OWNER_ID, is_premium=True, timeout_seconds=TIME_LIMIT_SECONDS)
+            logger.info(f"WHITELABEL MODE ACTIVE: hardcoded group {CLIENT_GROUP_CHAT_ID} registered to owner {CLIENT_OWNER_ID}.")
+
+def main():
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is missing from your environment variables!")
+        return
+
+    logger.info("Initializing SecureGate Bot application...")
+    
+    # Enable Job Queue
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init_callback).build()
+
+    # Handlers Configuration
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("setup", setup_command_handler))
+    application.add_handler(CommandHandler("premium", premium_command_handler))
+    application.add_handler(CommandHandler("settings", settings_command_handler))
+
+    # Math buttons query response
+    application.add_handler(CallbackQueryHandler(on_math_callback, pattern="^math_"))
+    
+    # Video note/Video verification responses in private chat DMs
+    application.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & (filters.VIDEO | filters.VIDEO_NOTE), 
+        on_private_video
+    ))
+
+    # Admin verification decisions Callback Query
+    application.add_handler(CallbackQueryHandler(on_admin_decision_callback, pattern="^admin_"))
+
+    # Admin timeout configurations Callback Query
+    application.add_handler(CallbackQueryHandler(on_settings_callback, pattern="^set_time_"))
+
+    # Stripe Billing handlers
+    application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+
+    # Intercept new members joining groups
+    application.add_handler(ChatMemberHandler(on_chat_member_updated, ChatMemberHandler.CHAT_MEMBER))
+
+    # Run Bot Polling
+    logger.info("SecureGate bot starting polling...")
+    application.run_polling(allowed_updates=["message", "callback_query", "chat_member", "pre_checkout_query"])
+
+if __name__ == "__main__":
+    main()

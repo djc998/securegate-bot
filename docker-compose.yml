@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: securegate_bot
+    restart: always
+    volumes:
+      # Map database to host to ensure persistence across container updates
+      - ./verification_bot.db:/app/verification_bot.db
+    env_file:
+      - .env
