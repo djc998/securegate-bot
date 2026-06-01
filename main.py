@@ -55,6 +55,14 @@ db = DatabaseManager()
 # Key: user_id (admin ID), Value: {"group_id": group_id, "action": "awaiting_video_prompt"}
 pending_admin_configs = {}
 
+def is_group_premium(group: dict) -> bool:
+    if group.get("is_premium"):
+        return True
+    trial_start = group.get("trial_started_at", 0)
+    if trial_start > 0 and time.time() < trial_start + 604800:
+        return True
+    return False
+
 # ----------------------------------------------------
 # TIMEOUT KICK CALLBACK
 # ----------------------------------------------------
@@ -235,7 +243,7 @@ async def on_math_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chosen_ans == correct_ans:
         # Correct answer!
-        if group["is_premium"]:
+        if is_group_premium(group):
             # Premium -> Proceed to Video verification Identity Gate
             await db.update_pending_user_status(target_user_id, target_group_id, "pending_video")
             
@@ -609,7 +617,30 @@ async def premium_command_handler(update: Update, context: ContextTypes.DEFAULT_
             await message.reply_text("❌ The entered premium activation code is invalid.")
             return
 
-    # Send Native Telegram Stars Invoice (Currency XTR, Provider Token must be empty!)
+    trial_start = group.get("trial_started_at", 0)
+    
+    if trial_start > 0 and time.time() < trial_start + 604800:
+        await message.reply_text("🎁 Your 7-Day Free Trial is currently active! You can still purchase a lifetime upgrade below.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Buy Premium (Stars) 🌟", callback_data=f"buy_premium_{chat_id}")]]), parse_mode="HTML")
+        return
+        
+    if not group.get("trial_used"):
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Start 7-Day Free Trial 🎁", callback_data=f"start_trial_{chat_id}")],
+            [InlineKeyboardButton("Buy Premium (Stars) 🌟", callback_data=f"buy_premium_{chat_id}")]
+        ])
+        await message.reply_text(
+            "🌟 <b>Upgrade to SecureGate Premium</b>\n\n"
+            "Unlock Tier-2 Video Identity Verification and advanced settings for your channel.\n\n"
+            "You have a one-time 7-day free trial available. Would you like to start it now, or purchase a lifetime upgrade?",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+        return
+
+    # Send Native Telegram Stars Invoice
+    await send_premium_invoice(context, user_id, chat_id, message)
+
+async def send_premium_invoice(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int, reply_to_message=None):
     title = "MySecureGate Premium Channel Upgrade"
     description = "Unlocks Tier-2 Video Identity Verification checks and settings dashboards for your channel."
     payload = f"premium_upgrade_{chat_id}"
@@ -629,10 +660,43 @@ async def premium_command_handler(update: Update, context: ContextTypes.DEFAULT_
             prices=prices,
             start_parameter="premium-stars-upgrade"
         )
-        await message.reply_text("📬 <b>Invoice Sent!</b>\n\nI have sent a secure Telegram Stars invoice to your private DMs. Click it to complete checkout with Stars.", parse_mode="HTML")
+        if reply_to_message:
+            await reply_to_message.reply_text("📬 <b>Invoice Sent!</b>\n\nI have sent a secure Telegram Stars invoice to your private DMs. Click it to complete checkout with Stars.", parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error dispatching Stars invoice: {e}")
-        await message.reply_text("❌ Could not dispatch payment details. Please check if you have started the bot in DMs.")
+        if reply_to_message:
+            await reply_to_message.reply_text("❌ Could not dispatch payment details. Please check if you have started the bot in DMs.")
+
+async def on_premium_buttons_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    action = parts[0] + "_" + parts[1] # "start_trial" or "buy_premium"
+    group_id = int(parts[2])
+
+    group = await db.get_group(group_id)
+    if not group:
+        return
+        
+    if query.from_user.id != group["owner_id"]:
+        await query.message.reply_text("❌ Only the registered group owner can unlock premium tiers.")
+        return
+
+    if action == "start_trial":
+        if group.get("trial_used"):
+            await query.edit_message_text("❌ You have already used your free trial for this group.")
+            return
+        
+        await db.start_group_trial(group_id, int(time.time()))
+        await query.edit_message_text(
+            "🎉 <b>7-Day Free Trial Activated!</b>\n\n"
+            "Premium features (Tier-2 Video Verification and custom settings) are now unlocked for 7 days. "
+            "You will be invoiced after the trial expires.",
+            parse_mode="HTML"
+        )
+    elif action == "buy_premium":
+        await send_premium_invoice(context, query.from_user.id, group_id, query.message)
 
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.pre_checkout_query
@@ -694,7 +758,17 @@ async def settings_command_handler(update: Update, context: ContextTypes.DEFAULT
         await message.reply_text("❌ You do not own any registered groups. Add me to a group and run /setup inside the group chat.")
         return
 
-    # Render settings list
+    # If owner has multiple groups, show selection menu first
+    if len(groups) > 1:
+        text = "🛡️ <b>MySecureGate Settings Control</b>\n\nYou manage multiple registered groups. Please select which group you would like to customize below:"
+        buttons = []
+        for g in groups:
+            buttons.append([InlineKeyboardButton(f"👥 Group {g['group_id']}", callback_data=f"set_time_{g['group_id']}_show")])
+        markup = InlineKeyboardMarkup(buttons)
+        await message.reply_text(text, reply_markup=markup, parse_mode="HTML")
+        return
+
+    # Render settings list directly if they only have one group
     await render_settings_dashboard(message, groups[0]["group_id"], edit=False)
 
 async def render_settings_dashboard(message_object, group_id: int, edit: bool = False):
@@ -702,11 +776,17 @@ async def render_settings_dashboard(message_object, group_id: int, edit: bool = 
     if not group:
         return
 
+    tier_status = "🆓 Free Plan (Math Challenge Only)"
+    if group["is_premium"]:
+        tier_status = "🌟 Premium (Tier 2 Active)"
+    elif is_group_premium(group):
+        tier_status = "🎁 7-Day Free Trial (Tier 2 Active)"
+
     custom_prompt = group['video_prompt'] if group['video_prompt'] else "[Default Standard Instructions]"
     text = (
         f"⚙️ <b>MySecureGate Settings Control</b>\n\n"
         f"Group: <code>{group_id}</code>\n"
-        f"Tier Status: {'🌟 Premium (Tier 2 Active)' if group['is_premium'] else '🆓 Free Plan (Math Challenge Only)'}\n"
+        f"Tier Status: {tier_status}\n"
         f"Verification Timeout: <b>{group['timeout_seconds']} seconds</b>\n"
         f"Custom Video Prompt: <code>{custom_prompt}</code>\n\n"
         f"Adjust the settings below:"
@@ -723,13 +803,28 @@ async def render_settings_dashboard(message_object, group_id: int, edit: bool = 
         ]
     ]
 
-    if group["is_premium"]:
+    if is_group_premium(group):
         buttons.append([
             InlineKeyboardButton("Edit Video Prompt ✏️", callback_data=f"set_time_{group_id}_edit")
         ])
     else:
         buttons.append([
             InlineKeyboardButton("Unlock Premium Video Gate 🌟", callback_data=f"set_time_{group_id}_unlock")
+        ])
+
+    # Check if this owner has multiple groups to render "Back to selector" button
+    owner_id = group["owner_id"]
+    owner_groups = []
+    async with aiosqlite.connect(db.db_path) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT group_id FROM groups WHERE owner_id = ?", (owner_id,)) as cursor:
+            rows = await cursor.fetchall()
+            for r in rows:
+                owner_groups.append(r["group_id"])
+
+    if len(owner_groups) > 1:
+        buttons.append([
+            InlineKeyboardButton("⬅️ Select Another Group", callback_data=f"set_time_{group_id}_list")
         ])
 
     markup = InlineKeyboardMarkup(buttons)
@@ -746,6 +841,24 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     parts = query.data.split("_")
     group_id = int(parts[2])
     action = parts[3]
+
+    # Quick selector list bypass
+    if action == "list":
+        groups = []
+        async with aiosqlite.connect(db.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute("SELECT group_id FROM groups WHERE owner_id = ?", (query.from_user.id,)) as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    groups.append(row["group_id"])
+                    
+        text = "🛡️ <b>MySecureGate Settings Control</b>\n\nYou manage multiple registered groups. Please select which group you would like to customize below:"
+        buttons = []
+        for gid in groups:
+            buttons.append([InlineKeyboardButton(f"👥 Group {gid}", callback_data=f"set_time_{gid}_show")])
+        markup = InlineKeyboardMarkup(buttons)
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+        return
 
     group = await db.get_group(group_id)
     if not group:
@@ -776,6 +889,8 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if new_timeout != current_timeout:
             await db.update_group_timeout(group_id, new_timeout)
             await render_settings_dashboard(query.message, group_id, edit=True)
+    elif action == "show":
+        await render_settings_dashboard(query.message, group_id, edit=True)
     elif action == "edit":
         # Awaiting custom prompt input
         pending_admin_configs[query.from_user.id] = {"group_id": group_id, "action": "awaiting_video_prompt"}
@@ -809,6 +924,27 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 # ----------------------------------------------------
 # MAIN INITIALIZER
 # ----------------------------------------------------
+async def check_trials_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Checking for expired premium trials...")
+    expired = await db.get_expired_uninvoiced_trials(int(time.time()))
+    for group in expired:
+        group_id = group["group_id"]
+        owner_id = group["owner_id"]
+        logger.info(f"Trial expired for group {group_id}. Sending invoice to owner {owner_id}.")
+        
+        try:
+            # Send message first
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=f"⚠️ <b>Premium Trial Expired</b>\n\nYour 7-day free trial for group <code>{group_id}</code> has expired. Premium features have been paused.\n\nPlease pay the invoice below to permanently upgrade and restore Tier-2 Video Verification.",
+                parse_mode="HTML"
+            )
+            # Send invoice
+            await send_premium_invoice(context, owner_id, group_id)
+            await db.mark_trial_invoiced(group_id)
+        except Exception as e:
+            logger.error(f"Failed to send expiration invoice to {owner_id} for group {group_id}: {e}")
+
 async def post_init_callback(application):
     # Initialize DB
     await db.init_db()
@@ -818,6 +954,9 @@ async def post_init_callback(application):
         if CLIENT_GROUP_CHAT_ID and CLIENT_OWNER_ID:
             await db.add_group(CLIENT_GROUP_CHAT_ID, CLIENT_OWNER_ID, is_premium=True, timeout_seconds=TIME_LIMIT_SECONDS)
             logger.info(f"WHITELABEL MODE ACTIVE: hardcoded group {CLIENT_GROUP_CHAT_ID} registered to owner {CLIENT_OWNER_ID}.")
+
+    # Start periodic trial expiration check (every hour = 3600 seconds)
+    application.job_queue.run_repeating(check_trials_job, interval=3600, first=10)
 
 def main():
     if not BOT_TOKEN:
@@ -855,6 +994,9 @@ def main():
 
     # Admin timeout configurations Callback Query
     application.add_handler(CallbackQueryHandler(on_settings_callback, pattern="^set_time_"))
+
+    # Premium Trial and Buy buttons
+    application.add_handler(CallbackQueryHandler(on_premium_buttons_callback, pattern="^(start_trial|buy_premium)_"))
 
     # Stripe Billing handlers
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))

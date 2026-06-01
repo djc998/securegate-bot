@@ -17,7 +17,10 @@ class DatabaseManager:
                     owner_id INTEGER NOT NULL,
                     is_premium BOOLEAN DEFAULT 0,
                     timeout_seconds INTEGER DEFAULT 300,
-                    video_prompt TEXT
+                    video_prompt TEXT,
+                    trial_started_at INTEGER DEFAULT 0,
+                    trial_invoiced BOOLEAN DEFAULT 0,
+                    trial_used BOOLEAN DEFAULT 0
                 )
             """)
             
@@ -37,6 +40,15 @@ class DatabaseManager:
                 await db.execute("ALTER TABLE groups ADD COLUMN video_prompt TEXT")
             except Exception:
                 pass
+
+            # Upgrade check: Alter groups to add trial columns (backwards compatibility)
+            for col, col_type in [("trial_started_at", "INTEGER DEFAULT 0"), 
+                                  ("trial_invoiced", "BOOLEAN DEFAULT 0"), 
+                                  ("trial_used", "BOOLEAN DEFAULT 0")]:
+                try:
+                    await db.execute(f"ALTER TABLE groups ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass
 
             await db.commit()
         logger.info("Database tables initialized successfully.")
@@ -72,7 +84,10 @@ class DatabaseManager:
                         "owner_id": row["owner_id"],
                         "is_premium": bool(row["is_premium"]),
                         "timeout_seconds": row["timeout_seconds"],
-                        "video_prompt": row["video_prompt"]
+                        "video_prompt": row["video_prompt"],
+                        "trial_started_at": row["trial_started_at"] if "trial_started_at" in row.keys() else 0,
+                        "trial_invoiced": bool(row["trial_invoiced"]) if "trial_invoiced" in row.keys() else False,
+                        "trial_used": bool(row["trial_used"]) if "trial_used" in row.keys() else False
                     }
                 return None
 
@@ -105,6 +120,46 @@ class DatabaseManager:
             )
             await db.commit()
         logger.info(f"Group {group_id} video prompt updated.")
+
+    async def start_group_trial(self, group_id: int, start_time: int):
+        """Starts a premium trial for a group."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE groups SET trial_started_at = ?, trial_used = 1 WHERE group_id = ?",
+                (start_time, group_id)
+            )
+            await db.commit()
+        logger.info(f"Group {group_id} started 7-day premium trial.")
+
+    async def mark_trial_invoiced(self, group_id: int):
+        """Marks a group's trial as having been invoiced."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE groups SET trial_invoiced = 1 WHERE group_id = ?",
+                (group_id,)
+            )
+            await db.commit()
+        logger.info(f"Group {group_id} premium trial marked as invoiced.")
+
+    async def get_expired_uninvoiced_trials(self, current_time: int):
+        """Retrieves groups whose trials have expired and have not been invoiced yet."""
+        # 7 days = 604800 seconds
+        expiration_threshold = current_time - 604800
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM groups WHERE trial_started_at > 0 AND trial_started_at < ? AND trial_invoiced = 0 AND is_premium = 0", 
+                (expiration_threshold,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                results = []
+                for row in rows:
+                    results.append({
+                        "group_id": row["group_id"],
+                        "owner_id": row["owner_id"],
+                        "trial_started_at": row["trial_started_at"]
+                    })
+                return results
 
     # ----------------------------------------------------
     # PENDING USERS MANAGEMENT METHODS
