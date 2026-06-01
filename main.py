@@ -559,7 +559,7 @@ async def setup_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await db.add_group(chat_id, user_id, is_premium=False, timeout_seconds=TIME_LIMIT_SECONDS)
     
     await message.reply_text(
-        "🛡️ <b>SecureGate Setup Completed!</b>\n\n"
+        "🛡️ <b>MySecureGate Setup Completed!</b>\n\n"
         "This group is now registered. I will intercept and challenge all new members joining.\n\n"
         "💡 <b>Admin Customization</b>:\n"
         "• Type /settings in my private DMs to configure verification timeouts.\n"
@@ -610,7 +610,7 @@ async def premium_command_handler(update: Update, context: ContextTypes.DEFAULT_
             return
 
     # Send Native Telegram Stars Invoice (Currency XTR, Provider Token must be empty!)
-    title = "SecureGate Premium Channel Upgrade"
+    title = "MySecureGate Premium Channel Upgrade"
     description = "Unlocks Tier-2 Video Identity Verification checks and settings dashboards for your channel."
     payload = f"premium_upgrade_{chat_id}"
     currency = "XTR"  # XTR is the currency code for Telegram Stars
@@ -662,7 +662,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
 async def settings_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if message.chat.type != "private":
-        await message.reply_text("❌ The settings dashboard can only be accessed privately in DMs (@SecureGate).")
+        await message.reply_text("❌ The settings dashboard can only be accessed privately in DMs (@MySecureGateBot).")
         return
 
     user_id = message.from_user.id
@@ -704,7 +704,7 @@ async def render_settings_dashboard(message_object, group_id: int, edit: bool = 
 
     custom_prompt = group['video_prompt'] if group['video_prompt'] else "[Default Standard Instructions]"
     text = (
-        f"⚙️ <b>SecureGate Settings Control</b>\n\n"
+        f"⚙️ <b>MySecureGate Settings Control</b>\n\n"
         f"Group: <code>{group_id}</code>\n"
         f"Tier Status: {'🌟 Premium (Tier 2 Active)' if group['is_premium'] else '🆓 Free Plan (Math Challenge Only)'}\n"
         f"Verification Timeout: <b>{group['timeout_seconds']} seconds</b>\n"
