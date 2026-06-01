@@ -32,6 +32,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "WHITELABEL").upper()
 TIME_LIMIT_SECONDS = int(os.getenv("TIME_LIMIT_SECONDS", "300"))
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
+PREMIUM_BYPASS_CODE = os.getenv("PREMIUM_BYPASS_CODE", "BYPASS123")
 
 CLIENT_OWNER_ID = os.getenv("CLIENT_OWNER_ID")
 CLIENT_GROUP_CHAT_ID = os.getenv("CLIENT_GROUP_CHAT_ID")
@@ -591,6 +592,22 @@ async def premium_command_handler(update: Update, context: ContextTypes.DEFAULT_
     if group["is_premium"]:
         await message.reply_text("🌟 Premium is already fully unlocked for this group!")
         return
+
+    # Check for bypass promo code argument
+    if context.args:
+        input_code = context.args[0].strip()
+        if input_code.upper() == PREMIUM_BYPASS_CODE.upper():
+            await db.update_group_premium(chat_id, is_premium=True)
+            await message.reply_text(
+                "🎉 <b>Bypass Code Activated!</b>\n\n"
+                "Premium subscription tier has been successfully unlocked for this group for free! "
+                "Identity Gate (Video Verification) and customization dashboards are now active.",
+                parse_mode="HTML"
+            )
+            return
+        else:
+            await message.reply_text("❌ The entered premium activation code is invalid.")
+            return
 
     # Send Native Telegram Stars Invoice (Currency XTR, Provider Token must be empty!)
     title = "SecureGate Premium Channel Upgrade"
