@@ -96,6 +96,10 @@ nav {
     color: var(--text-primary);
 }
 
+.nav-links a.btn-primary {
+    color: #fff;
+}
+
 .hamburger {
     display: none;
     cursor: pointer;
