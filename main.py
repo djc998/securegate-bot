@@ -1070,7 +1070,7 @@ async def botstats_command_handler(update: Update, context: ContextTypes.DEFAULT
         f"• Total Challenges: <code>{stats['total_verifications']}</code>\n"
         f"• Passed (Unmuted): <code>{stats['success_verifications']}</code>\n"
         f"• Failed/Timeout/Rejected: <code>{stats['failed_verifications']}</code>\n"
-        f"• Avg Completion Time: <code>{stats['avg_duration']}s</code>"
+        f"• Avg Completion Time: <code>{stats['avg_duration'] // 60}m {stats['avg_duration'] % 60}s</code>"
     )
     
     await message.reply_text(report_text, parse_mode="HTML")

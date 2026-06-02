@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FAQ | SecureGate Bot</title>
+    <meta name="description" content="Frequently Asked Questions about SecureGate Bot's Telegram group protection and verification layers.">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <nav>
+        <div class="container nav-container">
+            <a href="index.html" class="logo">
+                <span class="gradient-text">SecureGate</span>
+            </a>
+            <div class="hamburger">☰</div>
+            <div class="nav-links">
+                <a href="index.html">Home</a>
+                <a href="docs.html">Documentation</a>
+                <a href="faq.html" class="active">FAQ</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container faq-container">
+        <div class="section-header">
+            <h2 class="section-title">Frequently Asked <span class="gradient-text">Questions</span></h2>
+            <p style="color: var(--text-secondary);">Everything you need to know about the bot and billing.</p>
+        </div>
+
+        <div class="accordion-item">
+            <button class="accordion-header">
+                What happens if a user fails a challenge?
+                <span class="accordion-icon">+</span>
+            </button>
+            <div class="accordion-content">
+                <p style="padding-top: 16px;">If a user selects the incorrect mathematical answer or fails to answer within your custom timeout duration (e.g., 5 minutes), the bot automatically bans and instantly unbans them. This effectively kicks them from the group, preventing any bot network from silently lurking in your member list.</p>
+            </div>
+        </div>
+
+        <div class="accordion-item">
+            <button class="accordion-header">
+                Do my users have to verify every time they send a message?
+                <span class="accordion-icon">+</span>
+            </button>
+            <div class="accordion-content">
+                <p style="padding-top: 16px;">No! The verification funnel is strictly an entry-gate. Once a user solves the math puzzle (and submits a video if you have Premium), they are permanently unmuted and integrated into your community. They will never be bothered by the bot again.</p>
+            </div>
+        </div>
+
+        <div class="accordion-item">
+            <button class="accordion-header">
+                Is the video verification secure? Who sees it?
+                <span class="accordion-icon">+</span>
+            </button>
+            <div class="accordion-content">
+                <p style="padding-top: 16px;">The videos are transmitted privately via Telegram's end-to-end encrypted protocol. When a user submits a video in the bot's DMs, it is instantly forwarded <b>only</b> to the registered Group Owner's private messages for review. It is never posted publicly in the group chat, ensuring total privacy for your members.</p>
+            </div>
+        </div>
+
+        <div class="accordion-item">
+            <button class="accordion-header">
+                How do I configure the timeout duration?
+                <span class="accordion-icon">+</span>
+            </button>
+            <div class="accordion-content">
+                <p style="padding-top: 16px;">Simply send the <code>/settings</code> command to the bot in a private Direct Message. The bot will present an inline dashboard showing all the groups you own, allowing you to tweak timeouts dynamically without spamming your public chat with admin commands.</p>
+            </div>
+        </div>
+
+        <div class="accordion-item">
+            <button class="accordion-header">
+                How does billing work?
+                <span class="accordion-icon">+</span>
+            </button>
+            <div class="accordion-content">
+                <p style="padding-top: 16px;">SecureGate utilizes Telegram's native XTR currency (Telegram Stars). Running <code>/premium</code> inside your group chat dispatches a secure invoice to your DMs. You can use a one-time 7-day free trial, or pay the lifetime flat fee of 250 Stars to permanently unlock Tier-2 security for that specific group.</p>
+            </div>
+        </div>
+    </div>
+
+    <footer style="margin-top: 60px;">
+        <div class="container">
+            <p>&copy; 2026 SecureGate Bot. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

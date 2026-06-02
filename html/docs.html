@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documentation | SecureGate Bot</title>
+    <meta name="description" content="Read the official documentation for SecureGate Bot to understand commands, configurations, and verification layers.">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <nav>
+        <div class="container nav-container">
+            <a href="index.html" class="logo">
+                <span class="gradient-text">SecureGate</span>
+            </a>
+            <div class="hamburger">☰</div>
+            <div class="nav-links">
+                <a href="index.html">Home</a>
+                <a href="docs.html" class="active">Documentation</a>
+                <a href="faq.html">FAQ</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container docs-grid">
+        <aside class="sidebar">
+            <ul>
+                <li><a href="#quick-start">Quick Start</a></li>
+                <li><a href="#commands">Bot Commands</a></li>
+                <li><a href="#verification">Verification Tiers</a></li>
+                <li><a href="#premium">Premium Upgrade</a></li>
+            </ul>
+        </aside>
+
+        <main class="docs-content">
+            <h2 id="quick-start">Quick Start Guide</h2>
+            <p>Deploying SecureGate in your Telegram group takes less than 60 seconds.</p>
+            <ol style="margin-left: 20px; margin-bottom: 24px; color: var(--text-secondary);">
+                <li style="margin-bottom: 8px;">Add the bot to your group.</li>
+                <li style="margin-bottom: 8px;">Promote it to Administrator with the <b>Restrict Members</b> privilege.</li>
+                <li>Type <code>/setup</code> in the group chat.</li>
+            </ol>
+            <p>Once setup is complete, every new member joining will be instantly muted and presented with a mathematical captcha inline.</p>
+
+            <h2 id="commands" style="margin-top: 60px;">Command Reference</h2>
+            <p>Below is a list of commands and who can execute them.</p>
+
+            <h3><code>/setup</code></h3>
+            <p><b>Required Permission:</b> Group Admin</p>
+            <p>Initializes the group in the database and assigns you as the registered owner. Must be run in the target group chat.</p>
+
+            <h3><code>/settings</code></h3>
+            <p><b>Required Permission:</b> Group Owner</p>
+            <p>Must be run in a private DM with the bot. Opens the inline configuration dashboard where you can adjust the verification timeout duration (e.g., 30s, 5m, 1h) and customize the video prompt.</p>
+
+            <h3><code>/premium</code></h3>
+            <p><b>Required Permission:</b> Group Owner</p>
+            <p>Must be run in the target group chat. Dispatches a Telegram Stars checkout invoice to your private DMs to unlock Tier-2 Video Identity Verification.</p>
+
+            <h3><code>/verify [@username]</code></h3>
+            <p><b>Required Permission:</b> Group Admin</p>
+            <p>Manually approves a pending user and unmutes them instantly, bypassing the cognitive gate. Can be used by replying to a user's message with `/verify` or by tagging them.</p>
+
+            <h3><code>/botstats</code></h3>
+            <p><b>Required Permission:</b> Global Bot Creator</p>
+            <p>A private DM command that aggregates global statistics across all groups utilizing the bot, showing passing rates and average completion times.</p>
+
+            <h2 id="verification" style="margin-top: 60px;">Verification Tiers</h2>
+            
+            <h3>Tier 1: Cognitive Math Gate (Free)</h3>
+            <p>Upon joining, members lose all sending permissions. A randomized addition puzzle is presented in chat with 4 multiple-choice options. Incorrect answers or timeouts result in an automatic ban/unban (kick).</p>
+
+            <h3>Tier 2: Identity Video Gate (Premium)</h3>
+            <p>After solving the math puzzle, premium channels intercept the unmute action. The user is provided a URL portal linking to the bot's DMs. They must record or send a brief video message. The video is securely forwarded to the group owner's private inbox with Approve/Reject inline buttons. The user is only unmuted upon manual approval.</p>
+
+            <h2 id="premium" style="margin-top: 60px;">Premium Upgrade</h2>
+            <p>Premium is built natively into Telegram via Telegram Stars (XTR). You can start a 1-week free trial directly from the <code>/premium</code> menu or pay a one-time fee to permanently unlock the Video Gate and Dashboard for your specific group chat.</p>
+        </main>
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2026 SecureGate Bot. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>
