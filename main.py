@@ -93,7 +93,9 @@ async def kick_timeout_callback(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error kicking timed out user {user_id}: {e}")
 
-        # Delete pending entry
+        # Log timeout and delete pending entry
+        duration = int(time.time()) - pending["join_time"]
+        await db.log_verification(user_id, group_id, "timeout", duration, int(time.time()))
         await db.delete_pending_user(user_id, group_id)
 
 # ----------------------------------------------------
@@ -274,6 +276,8 @@ async def on_math_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # Free group -> Unmute instantly and delete from pending queue
             await unmute_member(context.bot, target_group_id, target_user_id)
+            duration = int(time.time()) - pending["join_time"]
+            await db.log_verification(target_user_id, target_group_id, "success", duration, int(time.time()))
             await db.delete_pending_user(target_user_id, target_group_id)
 
             await query.edit_message_text(
@@ -293,6 +297,8 @@ async def on_math_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error kicking failed math user {target_user_id}: {e}")
 
+        duration = int(time.time()) - pending["join_time"]
+        await db.log_verification(target_user_id, target_group_id, "failed_math", duration, int(time.time()))
         await db.delete_pending_user(target_user_id, target_group_id)
 
 # Helper function to unmute a member
@@ -483,6 +489,8 @@ async def on_admin_decision_callback(update: Update, context: ContextTypes.DEFAU
     if action == "approve":
         # UNMUTE & Clear queue
         await unmute_member(context.bot, target_group_id, target_user_id)
+        duration = int(time.time()) - pending["join_time"]
+        await db.log_verification(target_user_id, target_group_id, "success", duration, int(time.time()))
         await db.delete_pending_user(target_user_id, target_group_id)
 
         # Notify admin DM
@@ -522,6 +530,8 @@ async def on_admin_decision_callback(update: Update, context: ContextTypes.DEFAU
         except Exception as e:
             logger.error(f"Error kicking rejected user: {e}")
 
+        duration = int(time.time()) - pending["join_time"]
+        await db.log_verification(target_user_id, target_group_id, "rejected_video", duration, int(time.time()))
         await db.delete_pending_user(target_user_id, target_group_id)
         
         # Notify admin DM
@@ -626,6 +636,13 @@ async def verify_command_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # UNMUTE & Clear queue
     await unmute_member(context.bot, chat_id, target_user_id)
+    
+    # Check if there is a pending user record to calculate duration
+    pending = await db.get_pending_user(target_user_id, chat_id)
+    if pending:
+        duration = int(time.time()) - pending["join_time"]
+        await db.log_verification(target_user_id, chat_id, "success_manual", duration, int(time.time()))
+        
     await db.delete_pending_user(target_user_id, chat_id)
 
     # Cancel scheduled timeout job if exists
@@ -1026,6 +1043,39 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await render_settings_dashboard(query.message, context, group_id, edit=True)
 
 # ----------------------------------------------------
+# 7. BOT CREATOR REPORTING DASHBOARD
+# ----------------------------------------------------
+async def botstats_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if message.chat.type != "private":
+        await message.reply_text("❌ The stats dashboard can only be accessed privately in DMs.")
+        return
+
+    user_id = message.from_user.id
+    if CLIENT_OWNER_ID and user_id != CLIENT_OWNER_ID:
+        await message.reply_text("❌ Unauthorized. Only the configured Bot Creator can view global statistics.")
+        return
+
+    # Fetch stats
+    stats = await db.get_bot_statistics()
+    
+    report_text = (
+        "📊 <b>SecureGate Global Statistics</b>\n\n"
+        "🏢 <b>Group Usage</b>\n"
+        f"• Total Groups: <code>{stats['total_groups']}</code>\n"
+        f"• Premium Channels: <code>{stats['premium_groups']}</code>\n"
+        f"• Active Free Trials: <code>{stats['trial_groups']}</code>\n"
+        f"• Free Channels: <code>{stats['free_groups']}</code>\n\n"
+        "🛡️ <b>Verification Metrics</b>\n"
+        f"• Total Challenges: <code>{stats['total_verifications']}</code>\n"
+        f"• Passed (Unmuted): <code>{stats['success_verifications']}</code>\n"
+        f"• Failed/Timeout/Rejected: <code>{stats['failed_verifications']}</code>\n"
+        f"• Avg Completion Time: <code>{stats['avg_duration']}s</code>"
+    )
+    
+    await message.reply_text(report_text, parse_mode="HTML")
+
+# ----------------------------------------------------
 # MAIN INITIALIZER
 # ----------------------------------------------------
 async def check_trials_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1078,6 +1128,7 @@ def main():
     application.add_handler(CommandHandler("premium", premium_command_handler))
     application.add_handler(CommandHandler("settings", settings_command_handler))
     application.add_handler(CommandHandler("verify", verify_command_handler))
+    application.add_handler(CommandHandler("botstats", botstats_command_handler))
 
     # Math buttons query response
     application.add_handler(CallbackQueryHandler(on_math_callback, pattern="^math_"))

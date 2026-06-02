@@ -35,6 +35,18 @@ class DatabaseManager:
                 )
             """)
             
+            # Create verification_logs table for bot creator reporting
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS verification_logs (
+                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    group_id INTEGER,
+                    status TEXT NOT NULL,
+                    duration_seconds INTEGER,
+                    timestamp INTEGER NOT NULL
+                )
+            """)
+            
             # Upgrade check: Alter groups to add video_prompt if it does not exist (backwards compatibility)
             try:
                 await db.execute("ALTER TABLE groups ADD COLUMN video_prompt TEXT")
@@ -245,3 +257,65 @@ class DatabaseManager:
             )
             await db.commit()
         logger.info(f"User {user_id} deleted from verification queue of group {group_id}.")
+
+    # ----------------------------------------------------
+    # REPORTING & STATISTICS METHODS
+    # ----------------------------------------------------
+    async def log_verification(self, user_id: int, group_id: int, status: str, duration_seconds: int, timestamp: int):
+        """Logs the conclusion of a verification session."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO verification_logs (user_id, group_id, status, duration_seconds, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (user_id, group_id, status, duration_seconds, timestamp)
+            )
+            await db.commit()
+        logger.info(f"Logged verification for user {user_id} in group {group_id}: {status} ({duration_seconds}s)")
+
+    async def get_bot_statistics(self):
+        """Aggregates all bot statistics for the creator report."""
+        import time
+        current_time = int(time.time())
+        stats = {
+            "total_groups": 0,
+            "premium_groups": 0,
+            "trial_groups": 0,
+            "free_groups": 0,
+            "total_verifications": 0,
+            "success_verifications": 0,
+            "failed_verifications": 0,
+            "avg_duration": 0
+        }
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. Group Stats
+            async with db.execute("SELECT is_premium, trial_started_at FROM groups") as cursor:
+                rows = await cursor.fetchall()
+                stats["total_groups"] = len(rows)
+                for row in rows:
+                    if row[0]: # is_premium
+                        stats["premium_groups"] += 1
+                    else:
+                        trial_start = row[1]
+                        if trial_start > 0 and current_time < trial_start + 604800:
+                            stats["trial_groups"] += 1
+                        else:
+                            stats["free_groups"] += 1
+            
+            # 2. Verification Stats
+            async with db.execute("SELECT status, duration_seconds FROM verification_logs") as cursor:
+                logs = await cursor.fetchall()
+                stats["total_verifications"] = len(logs)
+                success_count = 0
+                total_duration = 0
+                for row in logs:
+                    if row[0] == "success":
+                        stats["success_verifications"] += 1
+                        success_count += 1
+                        total_duration += row[1]
+                    else:
+                        stats["failed_verifications"] += 1
+                        
+                if success_count > 0:
+                    stats["avg_duration"] = total_duration // success_count
+                    
+        return stats
